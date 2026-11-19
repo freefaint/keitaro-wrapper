@@ -121,11 +121,19 @@ async function loadFlows() {
     wrap.className = 'table-wrap';
     wrap.append(table);
     box.append(wrap);
+    const candidates = catalog.offers.filter(item => !activeOffers.some(offer => offer.offer_id === item.id));
+    if (!candidates.length) {
+      box.append(element('p', catalog.offers.length
+        ? 'Все доступные офферы уже есть в потоке или его архиве.'
+        : 'Keitaro не вернул доступных офферов.'));
+      flows.append(box);
+      continue;
+    }
     const addForm = element('form');
     const select = element('select');
     select.required = true;
     select.setAttribute('aria-label', 'Оффер для добавления');
-    options(select, catalog.offers.filter(item => !activeOffers.some(o => o.offer_id === item.id)), 'Выберите оффер');
+    options(select, candidates, 'Выберите оффер');
     addForm.append(select, element('button', 'Добавить'));
     addForm.addEventListener('submit', event => {
       event.preventDefault();
