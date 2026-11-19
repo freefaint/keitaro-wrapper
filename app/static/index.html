@@ -9,24 +9,25 @@
 </head>
 <body>
 <main>
-<header><span>KEITARO / КАМПАНИИ</span><h1>Кампании и офферы</h1></header>
+<header><span>KEITARO</span><h1>Кампании и офферы</h1></header>
+<p class="intro">Настройте, куда пойдут переходы, или измените офферы в существующей кампании.</p>
 <p id="status" role="status">Подключаемся к Keitaro…</p>
 <div class="layout">
 <section>
 <h2>Создать кампанию</h2>
 <form id="create">
-<label>Название <span id="prefix"></span><input name="name" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" placeholder="campaign1"></label>
+<label>Название <small id="prefix"></small><input name="name" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" placeholder="campaign1"></label>
 <label>Код страны<input name="country" required minlength="2" maxlength="2" pattern="[A-Za-z]{2}" placeholder="DE"></label>
 <label>Оффер<select name="offer_id" required></select></label>
 <label>Домен<select name="domain_id" required></select></label>
 <label>Группа<select name="group_id" required></select></label>
 <label>Источник<select name="traffic_source_id" required></select></label>
-<button>Создать</button>
+<button>Создать кампанию</button>
 </form>
 </section>
 <section>
 <h2>Редактор офферов</h2>
-<div class="toolbar"><label>Кампания<select id="campaign"></select></label><button id="reload" type="button">Обновить</button></div>
+<div class="toolbar"><label>Кампания<select id="campaign"></select></label><button id="reload" class="secondary" type="button">Обновить</button></div>
 <p id="stats-note"></p>
 <div id="flows"></div>
 </section>

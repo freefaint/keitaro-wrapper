@@ -46,7 +46,12 @@ async function loadCampaigns(selected = campaign.value) {
 async function loadFlows() {
   flows.replaceChildren();
   statsNote.textContent = '';
-  if (!campaign.value) return;
+  if (!campaign.value) {
+    const empty = element('p', 'Выберите кампанию, чтобы увидеть её потоки и офферы.');
+    empty.className = 'empty';
+    flows.append(empty);
+    return;
+  }
   const id = campaign.value;
   const data = await api('/campaigns/' + id);
   let stats;
@@ -75,6 +80,7 @@ async function loadFlows() {
       actions.className = 'actions';
       const publish = element('button', 'Опубликовать');
       const cancel = element('button', 'Отменить черновик');
+      cancel.className = 'secondary';
       publish.addEventListener('click', () => act('publish'));
       cancel.addEventListener('click', () => act('cancel'));
       actions.append(element('span', 'Черновик'), publish, cancel);
@@ -101,10 +107,12 @@ async function loadFlows() {
       buttons.className = 'actions';
       const removed = offer.state === 'removed';
       const remove = element('button', removed ? 'Вернуть' : 'Убрать');
+      remove.className = 'secondary';
       remove.addEventListener('click', () => act(removed ? 'restore' : 'remove', offer.offer_id));
       buttons.append(remove);
       if (offer.state === 'active') {
         const pin = element('button', offer.pinned ? 'Открепить долю' : 'Закрепить долю');
+        pin.className = 'secondary';
         pin.addEventListener('click', () => act(offer.pinned ? 'unpin' : 'pin', offer.offer_id));
         buttons.append(pin);
       }
