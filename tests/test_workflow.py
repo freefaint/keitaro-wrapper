@@ -136,3 +136,18 @@ def test_archived_offer_does_not_create_incomplete_campaign(tracker):
     })
     assert response.status_code == 422
     assert calls == [("GET", "offers/99", None)]
+
+
+def test_tracker_access_rejection_explains_next_step():
+    def blocked(request):
+        return httpx.Response(403, text="<html>Forbidden</html>")
+
+    with httpx.Client(base_url="https://mock.test/admin_api/v1/", transport=httpx.MockTransport(blocked)) as upstream:
+        main.app.dependency_overrides[main.tracker] = lambda: upstream
+        try:
+            response = TestClient(main.app).get("/api/campaigns")
+        finally:
+            main.app.dependency_overrides.pop(main.tracker, None)
+    assert response.status_code == 502
+    assert "403" in response.json()["detail"]
+    assert "python3 run.py --demo" in response.json()["detail"]

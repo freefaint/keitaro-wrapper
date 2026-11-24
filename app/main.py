@@ -61,6 +61,13 @@ def upstream(client, method, path, **kwargs):
         return response.json() if response.content else None
     except httpx.HTTPStatusError as error:
         status = error.response.status_code
+        if status == 401:
+            raise HTTPException(502, "Keitaro отклонил API-ключ (401). Проверьте KEITARO_API_KEY в .env.") from error
+        if status == 403:
+            raise HTTPException(
+                502, "Keitaro запретил доступ (403). Проверьте права ключа и доступ к Admin API. "
+                "Интерфейс можно попробовать без подключения: python3 run.py --demo."
+            ) from error
         raise HTTPException(404 if status == 404 else 502, f"Keitaro: HTTP {status} ({path})") from error
     except httpx.TimeoutException as error:
         raise HTTPException(504, f"Keitaro не ответил вовремя ({path})") from error
