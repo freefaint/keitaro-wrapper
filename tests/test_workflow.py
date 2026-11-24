@@ -25,7 +25,16 @@ def tracker(tmp_path, monkeypatch):
         path = request.url.path.removeprefix("/admin_api/v1/")
         payload = json.loads(request.content) if request.content else None
         calls.append((request.method, path, payload))
-        if path.startswith("offers/"):
+        if path == "campaigns" and request.method == "GET":
+            offset = int(request.url.params["offset"])
+            result = {
+                0: [{"id": 11, "name": "somebody_else", "state": "active"}],
+                1: [{"id": 10, "name": "test_demo_sandbox", "state": "disabled"}],
+                2: [{"id": 12, "name": "test_demo_archive", "state": "archived"}],
+            }.get(offset, [])
+        elif path == "offers/99":
+            result = {"state": "archived"}
+        elif path.startswith("offers/"):
             result = {"state": "active"}
         elif path == "campaigns" and request.method == "POST":
             result = {"id": 10}
@@ -105,3 +114,25 @@ def test_draft_pin_cancel_archive_restore_and_conflict(tracker):
     assert details()["dirty"]
     assert client.get("/api/campaigns/10/stats").json()["rows"][0]["clicks"] == 25
     assert calls[-1][2]["filters"][0]["expression"] == 10
+
+
+def test_campaign_list_reads_later_pages_and_keeps_disabled_campaigns(tracker):
+    client, _, calls = tracker
+    response = client.get("/api/campaigns")
+    assert response.status_code == 200
+    assert response.json() == [{"id": 10, "name": "test_demo_sandbox", "state": "disabled"}]
+    assert [(method, path) for method, path, _ in calls] == [("GET", "campaigns")] * 4
+
+
+def test_archived_offer_does_not_create_incomplete_campaign(tracker):
+    client, _, calls = tracker
+    response = client.post("/api/campaigns", json={
+        "name": "sandbox",
+        "country": "AU",
+        "offer_id": 99,
+        "domain_id": 2,
+        "group_id": 3,
+        "traffic_source_id": 4,
+    })
+    assert response.status_code == 422
+    assert calls == [("GET", "offers/99", None)]

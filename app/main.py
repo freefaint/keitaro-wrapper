@@ -7,18 +7,20 @@ from typing import Annotated
 import httpx
 import pycountry
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, PositiveInt, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import CampaignSetup, FlowDraft, engine
+from app.demo import DemoTracker
 
 app = FastAPI(title="Keitaro Campaigns")
 static = Path(__file__).with_name("static")
 app.mount("/static", StaticFiles(directory=static), name="static")
 edit_lock = threading.Lock()
+demo_tracker = DemoTracker() if os.getenv("KEITARO_DEMO") == "1" else None
 prefix = os.getenv("CAMPAIGN_PREFIX", "test_demo_")
 if not re.fullmatch(r"test_[a-z0-9]+_", prefix):
     raise RuntimeError("CAMPAIGN_PREFIX must have the form test_surname_")
@@ -29,12 +31,18 @@ async def local_writes(request: Request, call_next):
     if request.method in {"POST", "PUT", "DELETE"} and request.headers.get("origin") not in {
         None, str(request.base_url).rstrip("/")
     }:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "Cross-origin write rejected"}, status_code=403)
     return await call_next(request)
 
 
 def tracker():
+    if demo_tracker is not None:
+        with httpx.Client(
+            base_url="http://demo.invalid/admin_api/v1/",
+            transport=httpx.MockTransport(demo_tracker.request),
+        ) as client:
+            yield client
+        return
     key = os.getenv("KEITARO_API_KEY")
     if not key:
         raise HTTPException(503, "Заполните KEITARO_API_KEY в .env и перезапустите приложение")
@@ -54,8 +62,32 @@ def upstream(client, method, path, **kwargs):
     except httpx.HTTPStatusError as error:
         status = error.response.status_code
         raise HTTPException(404 if status == 404 else 502, f"Keitaro: HTTP {status} ({path})") from error
+    except httpx.TimeoutException as error:
+        raise HTTPException(504, f"Keitaro не ответил вовремя ({path})") from error
     except (httpx.RequestError, ValueError) as error:
         raise HTTPException(502, f"Нет корректного ответа от Keitaro ({path})") from error
+
+
+def upstream_object(client, method, path, fields=(), **kwargs):
+    result = upstream(client, method, path, **kwargs)
+    if not isinstance(result, dict) or any(field not in result for field in fields):
+        raise HTTPException(502, f"Неожиданный формат ответа Keitaro ({path})")
+    return result
+
+
+def upstream_rows(client, path, fields, **kwargs):
+    rows = upstream(client, "GET", path, **kwargs)
+    if not isinstance(rows, list) or (
+        any(not isinstance(row, dict) or any(field not in row for field in fields) for row in rows)
+    ):
+        raise HTTPException(502, f"Неожиданный формат списка Keitaro ({path})")
+    return rows
+
+
+def ensure_available_offer(client, offer_id):
+    offer = upstream_object(client, "GET", f"offers/{offer_id}")
+    if offer.get("state") in {"deleted", "archived"}:
+        raise HTTPException(422, "Этот оффер архивирован в Keitaro")
 
 
 class NewCampaign(BaseModel):
@@ -76,8 +108,10 @@ class NewCampaign(BaseModel):
 
 
 def owned_campaign(client, campaign_id):
-    campaign = upstream(client, "GET", f"campaigns/{campaign_id}")
-    if not campaign["name"].startswith(prefix):
+    campaign = upstream_object(client, "GET", f"campaigns/{campaign_id}", ("name",))
+    if campaign.get("state") in {"deleted", "archived"}:
+        raise HTTPException(404, "Кампания архивирована в Keitaro")
+    if not isinstance(campaign["name"], str) or not campaign["name"].startswith(prefix):
         raise HTTPException(403, f"Доступны только кампании с префиксом {prefix}")
     return campaign
 
@@ -96,20 +130,33 @@ def catalog(client: Tracker):
         ("sources", "traffic_sources", {}),
         ("offers", "offers", {}),
     ):
-        items = upstream(client, "GET", path, params=params)
+        items = upstream_rows(client, path, ("id", "name"), params=params)
         result[key] = [
             {"id": item["id"], "name": item["name"]} for item in items
             if item.get("state") not in {"deleted", "archived"}
         ]
-    return {**result, "prefix": prefix}
+    return {**result, "prefix": prefix, "demo": demo_tracker is not None}
 
 
 @app.get("/api/campaigns")
 def campaigns(client: Tracker):
-    items = upstream(client, "GET", "campaigns")
+    offset = 0
+    rows = {}
+    while True:
+        batch = upstream_rows(
+            client, "campaigns", ("id", "name"), params={"offset": offset, "limit": 100}
+        )
+        if not batch:
+            break
+        if all(row["id"] in rows for row in batch):
+            raise HTTPException(502, "Keitaro вернул повторную страницу кампаний")
+        rows.update((row["id"], row) for row in batch)
+        offset += len(batch)
+
     return [
         {"id": row["id"], "name": row["name"], "state": row.get("state")}
-        for row in items if row["name"].startswith(prefix) and row.get("state") != "deleted"
+        for row in rows.values()
+        if row["name"].startswith(prefix) and row.get("state") not in {"deleted", "archived"}
     ]
 
 
@@ -117,7 +164,7 @@ def campaigns(client: Tracker):
 def create_campaign(data: NewCampaign, client: Tracker):
     name = data.name if data.name.startswith(prefix) else prefix + data.name
     alias = name.lower()
-    upstream(client, "GET", f"offers/{data.offer_id}")
+    ensure_available_offer(client, data.offer_id)
     with Session(engine) as db:
         setup = CampaignSetup(alias=alias, phase="sending_campaign")
         db.add(setup)
@@ -128,7 +175,7 @@ def create_campaign(data: NewCampaign, client: Tracker):
             raise HTTPException(409, "Кампания с таким именем уже создана или требует проверки") from error
 
         try:
-            campaign = upstream(client, "POST", "campaigns", json={
+            campaign = upstream_object(client, "POST", "campaigns", ("id",), json={
                 "name": name, "alias": alias, "type": "position", "state": "disabled",
                 "domain_id": data.domain_id, "group_id": str(data.group_id),
                 "traffic_source_id": data.traffic_source_id,
@@ -160,7 +207,7 @@ def create_campaign(data: NewCampaign, client: Tracker):
 
 def campaign_flows(client, campaign_id):
     return [
-        flow for flow in upstream(client, "GET", f"campaigns/{campaign_id}/streams")
+        flow for flow in upstream_rows(client, f"campaigns/{campaign_id}/streams", ("id", "name", "schema"))
         if flow.get("state") != "deleted"
     ]
 
@@ -263,7 +310,7 @@ def update_draft(campaign_id: int, flow_id: int, data: DraftAction, client: Trac
                     raise HTTPException(409, "Поток изменился в Keitaro. Отмените черновик и обновите данные.")
                 if remote != payload:
                     upstream(client, "PUT", f"streams/{flow_id}", json={"offers": payload})
-                refreshed = upstream(client, "GET", f"streams/{flow_id}")
+                refreshed = upstream_object(client, "GET", f"streams/{flow_id}")
                 if remote_offers(refreshed) != payload:
                     raise HTTPException(502, "Keitaro вернул другие доли или статусы. Черновик сохранён.")
                 saved.published = synced_rows(refreshed, saved.draft)
@@ -274,14 +321,10 @@ def update_draft(campaign_id: int, flow_id: int, data: DraftAction, client: Trac
             rows = [row.copy() for row in (saved.draft if saved.draft is not None else saved.published)]
             offer = next((row for row in rows if row["offer_id"] == data.offer_id), None)
             if data.action == "add" and offer is None:
-                remote = upstream(client, "GET", f"offers/{data.offer_id}")
-                if remote.get("state") in {"deleted", "archived"}:
-                    raise HTTPException(422, "Этот оффер архивирован в Keitaro")
+                ensure_available_offer(client, data.offer_id)
                 rows.append({"offer_id": data.offer_id, "share": 0, "state": "active", "pinned": False})
             elif data.action == "restore" and offer and offer["state"] == "removed":
-                remote = upstream(client, "GET", f"offers/{data.offer_id}")
-                if remote.get("state") in {"deleted", "archived"}:
-                    raise HTTPException(422, "Этот оффер архивирован в Keitaro")
+                ensure_available_offer(client, data.offer_id)
                 offer["state"] = "active"
             elif data.action == "remove" and offer and offer["state"] != "removed":
                 offer.update(state="removed", share=0, pinned=False)
@@ -299,10 +342,12 @@ def update_draft(campaign_id: int, flow_id: int, data: DraftAction, client: Trac
 @app.get("/api/campaigns/{campaign_id}/stats")
 def campaign_stats(campaign_id: int, client: Tracker):
     owned_campaign(client, campaign_id)
-    report = upstream(client, "POST", "report/build", json={
+    report = upstream_object(client, "POST", "report/build", ("rows",), json={
         "range": {"interval": "all_time", "timezone": os.getenv("REPORT_TIMEZONE", "Europe/Moscow")},
         "dimensions": ["stream_id", "offer_id"],
         "measures": ["clicks", "conversions", "revenue", "cost", "profit"],
         "filters": [{"name": "campaign_id", "operator": "EQUALS", "expression": campaign_id}],
     })
+    if not isinstance(report["rows"], list) or any(not isinstance(row, dict) for row in report["rows"]):
+        raise HTTPException(502, "Неожиданный формат отчёта Keitaro")
     return {"rows": report["rows"]}
